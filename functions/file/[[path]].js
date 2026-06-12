@@ -23,6 +23,41 @@ export async function onRequest(context) {  // Contents of context object
         data, // arbitrary space for passing data between middlewares
     } = context;
 
+    const url = new URL(request.url);
+
+    // ====================================================
+    // 1. 安全校验：非管理员预览请求，必须校验短期数字签名
+    // ====================================================
+    const fromAdmin = url.searchParams.get('from') === 'admin';
+    if (!fromAdmin) {
+        const secretKey = env.SECURE_TOKEN_SECRET;
+        
+        // 只有在 Cloudflare 后台配置了 SECURE_TOKEN_SECRET 变量时才强制启用校验
+        if (secretKey) {
+            const token = url.searchParams.get('token');
+            const expires = url.searchParams.get('expires');
+
+            if (!token || !expires) {
+                return new Response('Error: Access Denied (Missing Signature Token)', { status: 403 });
+            }
+
+            // 检查链接是否已过期
+            const now = Math.floor(Date.now() / 1000);
+            if (now > parseInt(expires, 10)) {
+                return new Response('Error: Link Expired', { status: 403 });
+            }
+
+            // 验证签名完整性 (匹配：文件路径 + 到期时间戳)
+            const filePath = url.pathname; // 例如: /file/123.fla
+            const message = `${filePath}|${expires}`;
+            const isValid = await verifyHmacSha256(message, token, secretKey);
+            if (!isValid) {
+                return new Response('Error: Invalid Signature Token', { status: 403 });
+            }
+        }
+    }
+    // ====================================================
+
     // 解码文件ID
     let fileId = '';
     try {
@@ -36,7 +71,6 @@ export async function onRequest(context) {  // Contents of context object
     const securityConfig = await fetchSecurityConfig(env);
     context.securityConfig = securityConfig;
 
-    const url = new URL(request.url);
     context.url = url;
 
     const Referer = request.headers.get('Referer')
@@ -504,7 +538,7 @@ async function handleDiscordChunkedFile(context, imgRecord, encodedFileName, fil
                         const chunkStart = Math.max(0, rangeStart - currentPosition);
                         const chunkEnd = Math.min(chunkSize, rangeEnd - currentPosition + 1);
 
-                        // 如果需要部分分片数据
+                        // 如果需要部分分片 data
                         if (chunkStart > 0 || chunkEnd < chunkSize) {
                             const partialData = chunkData.slice(chunkStart, chunkEnd);
                             controller.enqueue(partialData);
@@ -1002,4 +1036,31 @@ async function handleWebDAVFile(context, metadata, encodedFileName, fileType) {
     } catch (error) {
         return new Response(`Error: Failed to fetch from WebDAV - ${error.message}`, { status: 500 });
     }
+}
+
+// 辅助函数：使用 Web Crypto API 验证 HMAC-SHA256 签名是否合法
+async function verifyHmacSha256(message, receivedHex, secret) {
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(secret);
+    const messageData = encoder.encode(message);
+
+    const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        keyData,
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+    );
+
+    const signature = await crypto.subtle.sign(
+        "HMAC",
+        cryptoKey,
+        messageData
+    );
+
+    const expectedHex = Array.from(new Uint8Array(signature))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+
+    return expectedHex === receivedHex;
 }
