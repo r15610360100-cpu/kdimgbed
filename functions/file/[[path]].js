@@ -48,7 +48,8 @@ export async function onRequest(context) {  // Contents of context object
             }
 
             // 验证签名完整性 (匹配：文件路径 + 到期时间戳)
-            const filePath = url.pathname; // 例如: /file/123.fla
+            // 使用 decodeURIComponent 对路径强制解码，确保与 PHP 端明文一致
+            const filePath = decodeURIComponent(url.pathname); 
             const message = `${filePath}|${expires}`;
             const isValid = await verifyHmacSha256(message, token, secretKey);
             if (!isValid) {
